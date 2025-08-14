@@ -1,0 +1,79 @@
+name: SAM Local Build & Test on Push
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: sam-local-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sam-local-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies (pipx)
+        run: |
+          sudo apt-get update
+          python -m pip install --upgrade pip
+          pip install --user pipx
+          python -m pipx ensurepath
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          pipx install aws-sam-cli
+
+      - name: Verify SAM CLI
+        run: sam --version
+
+      - name: Build SAM app
+        run: sam build
+
+      - name: Start SAM Local API in background
+        env:
+          SAM_CLI_TELEMETRY: 0
+        run: |
+          nohup bash -c "sam local start-api --port 3000 --warm-containers EAGER" > sam_local.log 2>&1 &
+          echo $! > sam_local_pid.txt
+          echo "Waiting for API to be ready..."
+          for i in {1..90}; do
+            if curl -sSf "http://127.0.0.1:3000/hello" >/dev/null 2>&1; then
+              echo "API is up."
+              break
+            fi
+            sleep 1
+          done
+          tail -n 20 sam_local.log || true
+
+      - name: Test endpoints
+        run: |
+          echo "GET /hello:"
+          curl -s http://127.0.0.1:3000/hello
+
+          echo "GET /hello?name=Raj:"
+          curl -s "http://127.0.0.1:3000/hello?name=Raj"
+
+      - name: Stop local API
+        if: always()
+        run: |
+          [ -f pid.txt ] && kill $(cat pid.txt) || true
